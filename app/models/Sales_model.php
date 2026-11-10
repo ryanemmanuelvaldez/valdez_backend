@@ -87,7 +87,7 @@ class Sales_model extends Model
     {
         $records = $this->paid_records_sql();
         $rows = $this->call->database()->raw(
-            'SELECT owner.id AS owner_id, COALESCE(NULLIF(owner.full_name, ""), owner.username) AS owner_name, owner.email, '
+            'SELECT owner.id AS owner_id, COALESCE(NULLIF(owner.full_name, \'\'), owner.username) AS owner_name, owner.email, '
             . 'COUNT(paid_records.amount_centavos) AS transactions, COALESCE(SUM(paid_records.amount_centavos), 0) AS amount_centavos '
             . 'FROM users owner LEFT JOIN (' . $records['sql'] . ') paid_records ON paid_records.owner_id = owner.id '
             . 'WHERE owner.account_type = ? '
@@ -160,13 +160,13 @@ class Sales_model extends Model
     {
         $owner_filter = $owner_id === null ? '' : ' AND rr.owner_id = ?';
         $params = $owner_id === null ? [] : [$owner_id, $owner_id];
-        $sql = 'SELECT rr.owner_id, DATE_FORMAT(COALESCE(rp.paid_at, rp.created_at), "%Y-%m") AS month, rp.amount_centavos '
+        $sql = 'SELECT rr.owner_id, DATE_FORMAT(COALESCE(rp.paid_at, rp.created_at), \'%Y-%m\') AS month, rp.amount_centavos '
             . 'FROM rental_payments rp INNER JOIN rental_requests rr ON rr.id = rp.rental_request_id '
-            . 'WHERE rp.status = "paid"' . $owner_filter . ' '
+            . 'WHERE rp.status = \'paid\'' . $owner_filter . ' '
             . 'UNION ALL '
-            . 'SELECT rr.owner_id, DATE_FORMAT(COALESCE(ri.paid_at, ri.created_at), "%Y-%m") AS month, ri.amount_centavos '
+            . 'SELECT rr.owner_id, DATE_FORMAT(COALESCE(ri.paid_at, ri.created_at), \'%Y-%m\') AS month, ri.amount_centavos '
             . 'FROM rental_installments ri INNER JOIN rental_requests rr ON rr.id = ri.rental_request_id '
-            . 'WHERE ri.status = "paid" AND ri.installment_number > 1' . $owner_filter;
+            . 'WHERE ri.status = \'paid\' AND ri.installment_number > 1' . $owner_filter;
 
         return ['sql' => $sql, 'params' => $params];
     }
