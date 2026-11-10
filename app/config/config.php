@@ -401,7 +401,7 @@ $config['security_headers'] = [
     'cors' => [
         'allowed_origins' => array_values(array_filter(array_map(
             'trim',
-            explode(',', (string) rentease_env('API_ALLOWED_ORIGINS', ''))
+            explode(',', (string) rentease_env('API_ALLOWED_ORIGINS', 'https://ryvaldez-frontend.onrender.com'))
         ))),
         'credentials'     => true,
         'methods'         => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
