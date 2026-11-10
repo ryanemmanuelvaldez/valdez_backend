@@ -437,8 +437,11 @@ class Router
             $url = '/' . $url;
         }
 
-        if ($method === 'OPTIONS') {
+        if (strpos($url, '/api/') === 0) {
             handle_cors();
+        }
+
+        if ($method === 'OPTIONS') {
             http_response_code(204);
             exit;
         }
