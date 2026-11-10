@@ -262,10 +262,10 @@ $config['session_hmac_secret']     = rentease_env('APP_KEY');
 $config['cookie_prefix']           = '';
 $config['cookie_domain']           = '';
 $config['cookie_path']             = '/';
-$config['cookie_secure']           = FALSE;
+$config['cookie_secure']           = rentease_env('APP_ENV', 'development') === 'production';
 $config['cookie_expiration']       = 86400;
 $config['cookie_httponly']         = FALSE;
-$config['cookie_samesite']         = 'Strict';
+$config['cookie_samesite']         = rentease_env('SESSION_COOKIE_SAMESITE', 'Strict');
 
 /*
 |--------------------------------------------------------------------------
@@ -399,8 +399,11 @@ $config['security_headers'] = [
     // ── API ──
     'api_max_body' => 1048576,
     'cors' => [
-        'allowed_origins' => [],
-        'credentials'     => false,
+        'allowed_origins' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) rentease_env('API_ALLOWED_ORIGINS', ''))
+        ))),
+        'credentials'     => true,
         'methods'         => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
         'headers'         => 'Authorization, Content-Type, X-Requested-With',
         'max_age'         => 600,
