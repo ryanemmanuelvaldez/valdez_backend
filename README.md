@@ -35,6 +35,10 @@ Whether you are building a simple web application, a REST API, or a teaching pro
 - A web server with URL rewriting support (Apache `.htaccess` or Nginx config)
 - Composer (optional, for dependency management)
 
+## RentEase production environment
+
+For production deployments, set a persistent, randomly generated `APP_KEY` in the backend host's secret environment variables. Generate one with `php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"`; do not commit or share the value. Also set `APP_ENV=production`, `API_ALLOWED_ORIGINS` to the exact frontend origin, and `SESSION_COOKIE_SAMESITE=None` when the frontend and backend are on separate sites. Production session cookies are marked Secure automatically. Missing session configuration must be fixed in the backend host environment before account login can create a session.
+
 ---
 
 ## Installation

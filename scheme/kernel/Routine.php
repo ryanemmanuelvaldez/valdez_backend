@@ -191,10 +191,27 @@ if ( ! function_exists('_exception_handler'))
 			$logger = load_class('logger', 'kernel');
 			$logger->log('error', get_class($e), $e->getMessage(), $e->getFile(), $e->getLine());
 		}
-		if(strtolower(config_item('environment') == 'development'))
+		if(strtolower((string) config_item('environment')) === 'development')
 		{
 			$exception = load_class('Errors', 'kernel');
 			$exception->show_exception($e);
+		}
+
+		$request_path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+		if (is_string($request_path) && strpos($request_path, '/api/') !== false) {
+			error_log('RentEase API exception: ' . get_class($e) . ' at ' . $e->getFile() . ':' . $e->getLine());
+			if (!headers_sent()) {
+				http_response_code(500);
+				header('Content-Type: application/json; charset=utf-8');
+				header('Cache-Control: no-store');
+			}
+			echo json_encode([
+				'success' => false,
+				'message' => $e->getMessage() === 'Session security requires an encryption key. Please set session_hmac_secret in your config file.'
+					? 'Backend session security is not configured. Set a strong APP_KEY environment variable and redeploy.'
+					: 'The service encountered a server error. Please try again later.',
+			], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+			return;
 		}
 		
 	}
