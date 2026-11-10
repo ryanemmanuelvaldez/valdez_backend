@@ -64,7 +64,7 @@ $config['version']                 = '4.7.0';
 | -------------------------------------------------------------------
 | Values: development and production
 */
-$config['environment'] = getenv('APP_ENV') ?: 'development';
+$config['environment'] = rentease_env('APP_ENV', 'development') ?: 'development';
 
 /*
 |--------------------------------------------------------------------------
@@ -248,7 +248,7 @@ $config['creation_window']         = 60;
 $config['lock_duration_creation']  = 120;
 $config['security_file']           = ROOT_DIR . 'runtime/session/session_security.json';
 $config['sess_inactivity_timeout'] = 1800;
-$config['session_hmac_secret']     = getenv('APP_KEY') ?: '';
+$config['session_hmac_secret']     = rentease_env('APP_KEY');
 
 /*
 |--------------------------------------------------------------------------
@@ -297,7 +297,7 @@ $config['cache_default_expires']   = 0;
 |
 |
 */
-$config['encryption_key']           = getenv('APP_KEY') ?: '';
+$config['encryption_key']           = rentease_env('APP_KEY');
 
 /*
 |--------------------------------------------------------------------------

@@ -62,8 +62,23 @@ if (file_exists(ROOT_DIR . '.env')) {
             $value = substr($value, 1, -1);
         }
 
-        putenv("$key=$value");
         $_ENV[$key] = $_SERVER[$key] = $value;
+    }
+}
+
+if (!function_exists('rentease_env')) {
+    function rentease_env($key, $default = '')
+    {
+        if (array_key_exists($key, $_ENV)) {
+            return $_ENV[$key];
+        }
+
+        if (array_key_exists($key, $_SERVER)) {
+            return $_SERVER[$key];
+        }
+
+        $value = getenv($key);
+        return $value === false ? $default : $value;
     }
 }
 
@@ -246,9 +261,23 @@ if (php_sapi_name() === 'cli') {
     $method = 'GET';
     
 } else {
-    $base  = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/');
-	$path  = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-	$url   = $router->sanitize_url(substr($path, strlen($base)) ?: '/');
+    $base = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'])), '/');
+    $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+    $route_path = $path;
+
+    $prefixes = [$base];
+    if (substr($base, -7) === '/public') {
+        $prefixes[] = substr($base, 0, -7);
+    }
+
+    foreach ($prefixes as $prefix) {
+        if ($prefix !== '' && ($path === $prefix || strpos($path, $prefix . '/') === 0)) {
+            $route_path = substr($path, strlen($prefix));
+            break;
+        }
+    }
+
+	$url   = $router->sanitize_url($route_path ?: '/');
     $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper($_SERVER['REQUEST_METHOD']) : 'GET';
 }
 

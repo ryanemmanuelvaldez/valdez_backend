@@ -58,14 +58,14 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 */
 
 $database['main'] = array(
-    'driver'	=> getenv('DB_DRIVER') ?: '',
-    'hostname'	=> getenv('DB_HOST') ?: '',
-    'port'		=> getenv('DB_PORT') ?: '',
-    'username'	=> getenv('DB_USER') ?: '',
-    'password'	=> getenv('DB_PASSWORD') ?: '',
-    'database'	=> getenv('DB_NAME') ?: '',
-    'charset'	=> getenv('DB_CHARSET') ?: '',
-    'dbprefix'	=> getenv('DB_PREFIX') ?: '',
+    'driver'	=> rentease_env('DB_DRIVER'),
+    'hostname'	=> rentease_env('DB_HOST'),
+    'port'		=> rentease_env('DB_PORT'),
+    'username'	=> rentease_env('DB_USER'),
+    'password'	=> rentease_env('DB_PASSWORD'),
+    'database'	=> rentease_env('DB_NAME'),
+    'charset'	=> rentease_env('DB_CHARSET'),
+    'dbprefix'	=> rentease_env('DB_PREFIX'),
     // Optional for SQLite
     'path'      => ''
 );
