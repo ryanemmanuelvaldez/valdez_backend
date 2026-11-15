@@ -158,7 +158,7 @@ class Auth extends Controller
         }
         $this->respond(200, [
             'success' => true,
-            'message' => 'If an active account uses that email, a password reset code has been sent.',
+            'message' => 'If an active account uses that email, a password reset code may be sent. For security, we cannot confirm account existence or email delivery here.',
         ]);
     }
 
@@ -298,7 +298,7 @@ class Auth extends Controller
             ->where('purpose', $purpose)
             ->order_by('created_at', 'DESC')
             ->row_array();
-        if ($recent && strtotime($recent['created_at']) > time() - 60) {
+        if ($recent && empty($recent['consumed_at']) && strtotime($recent['created_at']) > time() - 60) {
             return false;
         }
 
@@ -329,10 +329,19 @@ class Auth extends Controller
                 . 'WHERE `user_id` = ? AND `purpose` = ? AND `created_at` = ?',
                 [date('Y-m-d H:i:s'), (int) $user['id'], $purpose, $now]
             );
-            error_log('RentEase Gmail code delivery failed for user ' . (int) $user['id'] . ': ' . $exception->getMessage());
-            $message = strpos($exception->getMessage(), '(response 535)') !== false
-                ? 'Gmail rejected the sender login. Replace the App Password in BackendLL/.env with a valid 16-character Google App Password.'
-                : 'Could not send the email code. Check Gmail SMTP settings in BackendLL/.env and try again shortly.';
+            $provider = strtolower(trim((string) rentease_env('MAIL_PROVIDER', 'smtp')));
+            error_log('RentEase email code delivery failed for user ' . (int) $user['id'] . ' via ' . $provider . ': ' . $exception->getMessage());
+            if ($provider === 'resend' && strpos($exception->getMessage(), '(HTTP 401)') !== false) {
+                $message = 'The email provider rejected its API key. Check RESEND_API_KEY in the backend environment.';
+            } elseif ($provider === 'resend' && strpos($exception->getMessage(), '(HTTP 403)') !== false) {
+                $message = 'The email provider rejected the sender. Verify your sender domain and RESEND_FROM_ADDRESS.';
+            } elseif (in_array($provider, ['smtp', 'brevo'], true) && strpos($exception->getMessage(), '(response 535)') !== false) {
+                $message = $provider === 'brevo'
+                    ? 'Brevo rejected the SMTP login. Check MAIL_USERNAME and MAIL_PASSWORD in the backend environment.'
+                    : 'Gmail rejected the sender login. Replace the App Password in the backend environment.';
+            } else {
+                $message = 'Could not send the email code. Check the email provider settings and backend logs, then try again.';
+            }
             $this->respond(503, ['success' => false, 'message' => $message]);
         }
     }

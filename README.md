@@ -39,6 +39,19 @@ Whether you are building a simple web application, a REST API, or a teaching pro
 
 For production deployments, set a persistent, randomly generated `APP_KEY` in the backend host's secret environment variables. Generate one with `php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"`; do not commit or share the value. Also set `APP_ENV=production`, `API_ALLOWED_ORIGINS` to the exact frontend origin, and `SESSION_COOKIE_SAMESITE=None` when the frontend and backend are on separate sites. Production session cookies are marked Secure automatically. Missing session configuration must be fixed in the backend host environment before account login can create a session.
 
+### Email codes on Render
+
+The forgot-password and email-verification forms send a request to the backend when the user clicks **Send code**. On Render, use Resend's HTTPS API rather than Gmail SMTP. The backend Docker image must include PHP cURL, which is installed by the Dockerfile.
+
+1. In Resend, create an API key and verify a sender domain. Configure the domain's required DNS records before using a sender address on it.
+2. In the Render backend service's **Environment**, set:
+   - `MAIL_PROVIDER=resend`
+   - `RESEND_API_KEY` to the Resend API key (keep it secret)
+   - `RESEND_FROM_ADDRESS` to a sender on the verified domain, such as `RentEase <no-reply@yourdomain.com>`
+3. Save the environment changes and deploy the backend. After deployment succeeds, click **Send code** in the app. Check the recipient's spam folder if the email is not in the inbox.
+
+Do not set the Resend API key in frontend code or commit it to `.env` files.
+
 ---
 
 ## Installation
