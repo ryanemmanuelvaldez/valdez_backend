@@ -41,16 +41,23 @@ For production deployments, set a persistent, randomly generated `APP_KEY` in th
 
 ### Email codes on Render
 
-The forgot-password and email-verification forms send a request to the backend when the user clicks **Send code**. On Render, use Resend's HTTPS API rather than Gmail SMTP. The backend Docker image must include PHP cURL, which is installed by the Dockerfile.
+The forgot-password and email-verification forms send a request to the backend when the user clicks **Send code**. To send from a Gmail account without a custom domain or SMTP, configure the Gmail API. The backend Docker image includes PHP cURL for its HTTPS requests.
 
-1. In Resend, create an API key and verify a sender domain. Configure the domain's required DNS records before using a sender address on it.
-2. In the Render backend service's **Environment**, set:
-   - `MAIL_PROVIDER=resend`
-   - `RESEND_API_KEY` to the Resend API key (keep it secret)
-   - `RESEND_FROM_ADDRESS` to a sender on the verified domain, such as `RentEase <no-reply@yourdomain.com>`
-3. Save the environment changes and deploy the backend. After deployment succeeds, click **Send code** in the app. Check the recipient's spam folder if the email is not in the inbox.
+1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable the Gmail API.
+2. Configure the OAuth consent screen and add the Gmail account that will send the messages as a test user.
+3. Create a **Web application** OAuth client and add `https://developers.google.com/oauthplayground` as an authorized redirect URI.
+4. Open [OAuth 2.0 Playground](https://developers.google.com/oauthplayground), enable **Use your own OAuth credentials** in its settings, and enter the OAuth client ID and secret.
+5. In the Playground, authorize `https://www.googleapis.com/auth/gmail.send`, exchange the authorization code for tokens, and copy the refresh token. Keep the client secret and refresh token private.
+6. In the Render backend service's **Environment**, set:
+   - `MAIL_PROVIDER=gmail_api`
+   - `GMAIL_API_CLIENT_ID` to the OAuth client ID
+   - `GMAIL_API_CLIENT_SECRET` to the OAuth client secret
+   - `GMAIL_API_REFRESH_TOKEN` to the refresh token
+   - `GMAIL_API_FROM_ADDRESS` to the same Gmail account used to authorize the token
+   - `MAIL_FROM_NAME=RentEase` (optional; this is the display name)
+7. Save the environment changes and deploy the backend. After deployment succeeds, click **Send code** in the app and check the inbox and spam folder.
 
-Do not set the Resend API key in frontend code or commit it to `.env` files.
+Google classifies `gmail.send` as a sensitive OAuth scope. An unverified app may show a consent warning, and refresh tokens for an external app left in **Testing** can expire after seven days. Google may require OAuth app verification for a public production app. Gmail sending quotas also apply. Never put OAuth secrets or refresh tokens in frontend code or commit them to `.env` files.
 
 ---
 

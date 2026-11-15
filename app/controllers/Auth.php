@@ -331,10 +331,14 @@ class Auth extends Controller
             );
             $provider = strtolower(trim((string) rentease_env('MAIL_PROVIDER', 'smtp')));
             error_log('RentEase email code delivery failed for user ' . (int) $user['id'] . ' via ' . $provider . ': ' . $exception->getMessage());
-            if ($provider === 'resend' && strpos($exception->getMessage(), '(HTTP 401)') !== false) {
-                $message = 'The email provider rejected its API key. Check RESEND_API_KEY in the backend environment.';
-            } elseif ($provider === 'resend' && strpos($exception->getMessage(), '(HTTP 403)') !== false) {
-                $message = 'The email provider rejected the sender. Verify your sender domain and RESEND_FROM_ADDRESS.';
+            if ($provider === 'gmail_api' && strpos($exception->getMessage(), 'Gmail API configuration') !== false) {
+                $message = 'Gmail API environment settings are incomplete. Check the OAuth client, refresh token, and sender address.';
+            } elseif ($provider === 'gmail_api' && strpos($exception->getMessage(), 'Google OAuth token refresh failed (HTTP 400)') !== false) {
+                $message = 'Google rejected the refresh token. Check the OAuth credentials and generate a new token if needed.';
+            } elseif ($provider === 'gmail_api' && strpos($exception->getMessage(), 'Google OAuth token refresh failed') !== false) {
+                $message = 'Google rejected the OAuth credentials. Check the OAuth client and refresh token in the backend environment.';
+            } elseif ($provider === 'gmail_api' && strpos($exception->getMessage(), 'Gmail API rejected') !== false) {
+                $message = 'Gmail API denied sending. Check that the API is enabled, the token has gmail.send scope, and the sender matches the authorized account.';
             } elseif (in_array($provider, ['smtp', 'brevo'], true) && strpos($exception->getMessage(), '(response 535)') !== false) {
                 $message = $provider === 'brevo'
                     ? 'Brevo rejected the SMTP login. Check MAIL_USERNAME and MAIL_PASSWORD in the backend environment.'

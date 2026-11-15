@@ -6,8 +6,8 @@ class Gmail_smtp
     public function send_code($recipient, $code, $purpose, $expires_minutes = 10)
     {
         $provider = strtolower(trim((string) rentease_env('MAIL_PROVIDER', 'smtp')));
-        if ($provider === 'resend') {
-            $this->send_with_resend($recipient, $code, $purpose, $expires_minutes);
+        if ($provider === 'gmail_api') {
+            $this->send_with_gmail_api($recipient, $code, $purpose, $expires_minutes);
             return;
         }
         if (!in_array($provider, ['smtp', 'brevo'], true)) {
@@ -88,17 +88,110 @@ class Gmail_smtp
         }
     }
 
-    private function send_with_resend($recipient, $code, $purpose, $expires_minutes)
+    private function send_with_gmail_api($recipient, $code, $purpose, $expires_minutes)
     {
-        $api_key = trim((string) rentease_env('RESEND_API_KEY'));
-        $sender = trim((string) rentease_env('RESEND_FROM_ADDRESS'));
-        if ($api_key === '' || $sender === '' || !filter_var($recipient, FILTER_VALIDATE_EMAIL)) {
-            throw new RuntimeException('Resend email configuration is incomplete or invalid.');
+        $client_id = trim((string) rentease_env('GMAIL_API_CLIENT_ID'));
+        $client_secret = trim((string) rentease_env('GMAIL_API_CLIENT_SECRET'));
+        $refresh_token = trim((string) rentease_env('GMAIL_API_REFRESH_TOKEN'));
+        $sender = trim((string) rentease_env('GMAIL_API_FROM_ADDRESS'));
+        $sender_name = trim((string) rentease_env('MAIL_FROM_NAME', 'RentEase'));
+        if ($client_id === '' || $client_secret === '' || $refresh_token === ''
+            || !filter_var($sender, FILTER_VALIDATE_EMAIL)
+            || !filter_var($recipient, FILTER_VALIDATE_EMAIL)) {
+            throw new RuntimeException('Gmail API configuration is incomplete or invalid.');
         }
         if (!function_exists('curl_init')) {
-            throw new RuntimeException('The PHP cURL extension is required for the Resend email API.');
+            throw new RuntimeException('The PHP cURL extension is required for the Gmail API.');
         }
 
+        $access_token = $this->gmail_api_access_token($client_id, $client_secret, $refresh_token);
+        $message = $this->build_email_message(
+            $sender,
+            $sender_name,
+            $recipient,
+            $code,
+            $purpose,
+            $expires_minutes
+        );
+        $payload = json_encode([
+            'raw' => rtrim(strtr(base64_encode($message), '+/', '-_'), '='),
+        ], JSON_UNESCAPED_SLASHES);
+        if ($payload === false) {
+            throw new RuntimeException('Could not prepare the email for the Gmail API.');
+        }
+
+        $response = $this->post_http(
+            'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+            $payload,
+            [
+                'Authorization: Bearer ' . $access_token,
+                'Content-Type: application/json',
+                'Accept: application/json',
+            ]
+        );
+        if ($response['status'] < 200 || $response['status'] >= 300) {
+            throw new RuntimeException('Gmail API rejected the email (HTTP ' . $response['status'] . ').');
+        }
+
+        $result = json_decode($response['body'], true);
+        if (!is_array($result) || empty($result['id'])) {
+            throw new RuntimeException('Gmail API returned an invalid email response.');
+        }
+    }
+
+    private function gmail_api_access_token($client_id, $client_secret, $refresh_token)
+    {
+        $response = $this->post_http(
+            'https://oauth2.googleapis.com/token',
+            http_build_query([
+                'client_id' => $client_id,
+                'client_secret' => $client_secret,
+                'refresh_token' => $refresh_token,
+                'grant_type' => 'refresh_token',
+            ]),
+            [
+                'Content-Type: application/x-www-form-urlencoded',
+                'Accept: application/json',
+            ]
+        );
+        if ($response['status'] < 200 || $response['status'] >= 300) {
+            throw new RuntimeException('Google OAuth token refresh failed (HTTP ' . $response['status'] . ').');
+        }
+
+        $result = json_decode($response['body'], true);
+        if (!is_array($result) || empty($result['access_token'])) {
+            throw new RuntimeException('Google OAuth returned an invalid access token response.');
+        }
+        return $result['access_token'];
+    }
+
+    private function post_http($url, $body, array $headers)
+    {
+        $curl = curl_init($url);
+        if ($curl === false) {
+            throw new RuntimeException('Could not initialize the HTTPS email request.');
+        }
+        curl_setopt_array($curl, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $body,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_TIMEOUT => max(5, min(30, (int) rentease_env('EMAIL_API_TIMEOUT', '15'))),
+        ]);
+        $response_body = curl_exec($curl);
+        $http_status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
+        $curl_error_number = curl_errno($curl);
+        curl_close($curl);
+
+        if ($response_body === false) {
+            throw new RuntimeException('Could not connect to the Google API (cURL error ' . $curl_error_number . ').');
+        }
+        return ['status' => $http_status, 'body' => $response_body];
+    }
+
+    private function build_email_message($sender, $sender_name, $recipient, $code, $purpose, $expires_minutes)
+    {
         $is_reset = $purpose === 'password_reset';
         $subject = $is_reset ? 'RentEase password reset code' : 'RentEase email verification code';
         $action = $is_reset ? 'reset your password' : 'verify your email address';
@@ -110,49 +203,30 @@ class Gmail_smtp
             . htmlspecialchars($code, ENT_QUOTES, 'UTF-8') . '</p><p>This code expires in '
             . (int) $expires_minutes . ' minutes. If you did not request it, you can ignore this email.</p>'
             . '</body></html>';
-        $payload = json_encode([
-            'from' => $sender,
-            'to' => [$recipient],
-            'subject' => $subject,
-            'text' => $text,
-            'html' => $html,
-        ], JSON_UNESCAPED_SLASHES);
-        if ($payload === false) {
-            throw new RuntimeException('Could not prepare the email for the Resend API.');
-        }
-
-        $curl = curl_init('https://api.resend.com/emails');
-        if ($curl === false) {
-            throw new RuntimeException('Could not initialize the Resend email API request.');
-        }
-        curl_setopt_array($curl, [
-            CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => $payload,
-            CURLOPT_HTTPHEADER => [
-                'Authorization: Bearer ' . $api_key,
-                'Content-Type: application/json',
-                'Accept: application/json',
-            ],
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_CONNECTTIMEOUT => 10,
-            CURLOPT_TIMEOUT => max(5, min(30, (int) rentease_env('EMAIL_API_TIMEOUT', '15'))),
-        ]);
-        $response_body = curl_exec($curl);
-        $http_status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
-        $curl_error_number = curl_errno($curl);
-        curl_close($curl);
-
-        if ($response_body === false) {
-            throw new RuntimeException('Could not connect to the Resend email API (cURL error ' . $curl_error_number . ').');
-        }
-        if ($http_status < 200 || $http_status >= 300) {
-            throw new RuntimeException('Resend API rejected the email (HTTP ' . $http_status . ').');
-        }
-
-        $result = json_decode($response_body, true);
-        if (!is_array($result) || empty($result['id'])) {
-            throw new RuntimeException('Resend API returned an invalid email response.');
-        }
+        $safe_sender_name = str_replace(["\r", "\n"], '', $sender_name);
+        $from_header = $safe_sender_name !== ''
+            ? 'From: =?UTF-8?B?' . base64_encode($safe_sender_name) . '?= <' . $sender . '>'
+            : 'From: <' . $sender . '>';
+        $boundary = 'rentease_' . bin2hex(random_bytes(16));
+        $headers = [
+            $from_header,
+            'To: <' . $recipient . '>',
+            'Subject: =?UTF-8?B?' . base64_encode($subject) . '?=',
+            'Date: ' . gmdate('D, d M Y H:i:s') . ' +0000',
+            'Message-ID: <' . bin2hex(random_bytes(16)) . '@rentease.local>',
+            'MIME-Version: 1.0',
+            'Content-Type: multipart/alternative; boundary="' . $boundary . '"',
+        ];
+        return implode("\r\n", $headers) . "\r\n\r\n"
+            . '--' . $boundary . "\r\n"
+            . "Content-Type: text/plain; charset=UTF-8\r\n"
+            . "Content-Transfer-Encoding: base64\r\n\r\n"
+            . chunk_split(base64_encode($text), 76, "\r\n")
+            . '--' . $boundary . "\r\n"
+            . "Content-Type: text/html; charset=UTF-8\r\n"
+            . "Content-Transfer-Encoding: base64\r\n\r\n"
+            . chunk_split(base64_encode($html), 76, "\r\n")
+            . '--' . $boundary . "--\r\n";
     }
 
     private function sender_email($sender)
@@ -165,43 +239,8 @@ class Gmail_smtp
 
     private function write_message($socket, $sender, $sender_name, $recipient, $code, $purpose, $expires_minutes)
     {
-        $is_reset = $purpose === 'password_reset';
-        $subject = $is_reset ? 'RentEase password reset code' : 'RentEase email verification code';
-        $action = $is_reset ? 'reset your password' : 'verify your email address';
-        $boundary = 'rentease_' . bin2hex(random_bytes(16));
-        $text_body = "Your RentEase code to {$action} is:\n\n{$code}\n\n"
-            . "This code expires in {$expires_minutes} minutes. If you did not request it, you can ignore this email.\n";
-        $html_body = '<!doctype html><html><body style="font-family:Arial,sans-serif;color:#173b30">'
-            . '<h2>RentEase account code</h2><p>Use this code to ' . htmlspecialchars($action, ENT_QUOTES, 'UTF-8') . ':</p>'
-            . '<p style="font-size:32px;font-weight:bold;letter-spacing:8px">'
-            . htmlspecialchars($code, ENT_QUOTES, 'UTF-8') . '</p><p>This code expires in '
-            . (int) $expires_minutes . ' minutes. If you did not request it, you can ignore this email.</p>'
-            . '</body></html>';
-        $safe_sender_name = str_replace(["\r", "\n"], '', $sender_name);
-        $from_header = $safe_sender_name !== ''
-            ? 'From: ' . $safe_sender_name . ' <' . $sender . '>'
-            : 'From: <' . $sender . '>';
-        $headers = [
-            $from_header,
-            'To: <' . $recipient . '>',
-            'Subject: =?UTF-8?B?' . base64_encode($subject) . '?=',
-            'Date: ' . gmdate('D, d M Y H:i:s') . ' +0000',
-            'Message-ID: <' . bin2hex(random_bytes(16)) . '@rentease.local>',
-            'MIME-Version: 1.0',
-            'Content-Type: multipart/alternative; boundary="' . $boundary . '"',
-        ];
-        $message = implode("\r\n", $headers) . "\r\n\r\n"
-            . '--' . $boundary . "\r\n"
-            . "Content-Type: text/plain; charset=UTF-8\r\n"
-            . "Content-Transfer-Encoding: base64\r\n\r\n"
-            . chunk_split(base64_encode($text_body), 76, "\r\n")
-            . '--' . $boundary . "\r\n"
-            . "Content-Type: text/html; charset=UTF-8\r\n"
-            . "Content-Transfer-Encoding: base64\r\n\r\n"
-            . chunk_split(base64_encode($html_body), 76, "\r\n")
-            . '--' . $boundary . "--\r\n";
-        $message = preg_replace('/(^|\r\n)\./', '$1..', $message);
-        $payload = $message . ".\r\n";
+        $message = $this->build_email_message($sender, $sender_name, $recipient, $code, $purpose, $expires_minutes);
+        $payload = preg_replace('/(^|\r\n)\./', '$1..', $message) . ".\r\n";
         $written = 0;
         $length = strlen($payload);
         while ($written < $length) {
