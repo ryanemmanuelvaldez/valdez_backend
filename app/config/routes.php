@@ -49,6 +49,7 @@ $router->get('/', 'Welcome::index');
 $router->post('/api/auth/register', 'Auth::register');
 $router->post('/api/auth/login', 'Auth::login');
 $router->get('/api/auth/me', 'Auth::me');
+$router->post('/api/auth/profile-photo', 'Auth::profile_photo');
 $router->post('/api/auth/logout', 'Auth::logout');
 $router->post('/api/auth/forgot-password', 'Auth::forgot_password');
 $router->post('/api/auth/reset-password', 'Auth::reset_password');

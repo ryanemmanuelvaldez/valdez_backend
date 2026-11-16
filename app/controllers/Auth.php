@@ -137,6 +137,68 @@ class Auth extends Controller
         $this->respond(200, ['success' => true, 'user' => $this->public_user($user)]);
     }
 
+    public function profile_photo()
+    {
+        $this->require_method('POST');
+        $session = $this->session();
+        $user_id = (int) $session->userdata('user_id');
+        if ($user_id < 1) {
+            $this->respond(401, ['success' => false, 'message' => 'Sign in to update your profile photo.']);
+        }
+
+        $file = $_FILES['profile_photo'] ?? [];
+        $upload_error = (int) ($file['error'] ?? UPLOAD_ERR_NO_FILE);
+        if ($upload_error !== UPLOAD_ERR_OK) {
+            $message = $upload_error === UPLOAD_ERR_INI_SIZE || $upload_error === UPLOAD_ERR_FORM_SIZE
+                ? 'Choose a JPEG or PNG photo no larger than 2 MB.'
+                : 'Choose a profile photo from your device.';
+            $this->respond(422, ['success' => false, 'message' => $message]);
+        }
+
+        $temporary_path = (string) ($file['tmp_name'] ?? '');
+        $size = (int) ($file['size'] ?? 0);
+        if ($size < 1 || $size > 2 * 1024 * 1024 || !is_uploaded_file($temporary_path)) {
+            $this->respond(422, ['success' => false, 'message' => 'Choose a JPEG or PNG photo no larger than 2 MB.']);
+        }
+
+        $finfo = new finfo(FILEINFO_MIME_TYPE);
+        $mime = $finfo->file($temporary_path);
+        if (!in_array($mime, ['image/jpeg', 'image/png'], true)) {
+            $this->respond(422, ['success' => false, 'message' => 'Only JPEG and PNG profile photos are accepted.']);
+        }
+
+        $image_data = file_get_contents($temporary_path);
+        if ($image_data === false) {
+            $this->respond(500, ['success' => false, 'message' => 'The uploaded profile photo could not be read.']);
+        }
+        $image_info = getimagesizefromstring($image_data);
+        $width = (int) ($image_info[0] ?? 0);
+        $height = (int) ($image_info[1] ?? 0);
+        if (!$image_info || ($image_info['mime'] ?? '') !== $mime || $width < 1 || $height < 1 || $width > 6000 || $height > 6000 || $width * $height > 36000000) {
+            $this->respond(422, ['success' => false, 'message' => 'The file must be a valid JPEG or PNG photo with reasonable image dimensions.']);
+        }
+
+        $db = $this->call->database();
+        $db->table('users')
+            ->where('id', $user_id)
+            ->update([
+                'profile_photo_data' => base64_encode($image_data),
+                'profile_photo_mime' => $mime,
+                'updated_at' => date('Y-m-d H:i:s'),
+            ]);
+        $user = $db->table('users')->where('id', $user_id)->row_array();
+        if (!$user || !(bool) $user['is_active']) {
+            $session->unset_userdata('user_id');
+            $this->respond(401, ['success' => false, 'message' => 'Your session is no longer active.']);
+        }
+
+        $this->respond(200, [
+            'success' => true,
+            'message' => 'Profile photo updated.',
+            'user' => $this->public_user($user),
+        ]);
+    }
+
     public function logout()
     {
         $this->require_method('POST');
@@ -466,10 +528,16 @@ class Auth extends Controller
 
     private function public_user(array $user)
     {
+        $profile_photo_mime = (string) ($user['profile_photo_mime'] ?? '');
+        $profile_photo_data = (string) ($user['profile_photo_data'] ?? '');
+        $profile_photo = $profile_photo_data !== '' && in_array($profile_photo_mime, ['image/jpeg', 'image/png'], true)
+            ? 'data:' . $profile_photo_mime . ';base64,' . $profile_photo_data
+            : null;
         return [
             'id' => (int) $user['id'],
             'full_name' => $user['full_name'] ?: $user['username'],
             'email' => $user['email'],
+            'profile_photo' => $profile_photo,
             'phone' => $user['phone'] ?? '',
             'account_type' => $user['account_type'] ?? 'tenant',
             'owner_status' => $user['owner_status'] ?? 'not_required',
