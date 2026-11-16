@@ -40,6 +40,8 @@ class Auth extends Controller
             $this->respond(422, ['success' => false, 'message' => 'Choose tenant or property owner.']);
         }
 
+        $this->verify_recaptcha($input['recaptcha_token'] ?? '');
+
         $this->call->model('User_model');
         $users = $this->User_model;
         $existing_user = $users->findByEmail($email);
@@ -89,6 +91,8 @@ class Auth extends Controller
         if ($email === '' || $password === '') {
             $this->respond(422, ['success' => false, 'message' => 'Enter your email address and password.']);
         }
+
+        $this->verify_recaptcha($input['recaptcha_token'] ?? '');
 
         $this->call->model('User_model');
         $users = $this->User_model;
@@ -376,6 +380,71 @@ class Auth extends Controller
     {
         $this->call->library('session');
         return load_class('session', 'libraries');
+    }
+
+    private function verify_recaptcha($token)
+    {
+        $token = trim((string) $token);
+        $secret = trim((string) rentease_env('RECAPTCHA_SECRET_KEY'));
+        if ($secret === '') {
+            $this->respond(503, ['success' => false, 'message' => 'reCAPTCHA is not configured on the server.']);
+        }
+        if ($token === '' || strlen($token) > 4096) {
+            $this->respond(422, ['success' => false, 'message' => 'Complete the reCAPTCHA check and try again.']);
+        }
+        if (!function_exists('curl_init')) {
+            error_log('reCAPTCHA verification is unavailable because PHP cURL is not installed.');
+            $this->respond(503, ['success' => false, 'message' => 'reCAPTCHA verification is temporarily unavailable. Try again later.']);
+        }
+
+        $curl = curl_init('https://www.google.com/recaptcha/api/siteverify');
+        if ($curl === false) {
+            error_log('Could not initialize the reCAPTCHA verification request.');
+            $this->respond(503, ['success' => false, 'message' => 'reCAPTCHA verification is temporarily unavailable. Try again later.']);
+        }
+        curl_setopt_array($curl, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => http_build_query([
+                'secret' => $secret,
+                'response' => $token,
+            ]),
+            CURLOPT_HTTPHEADER => ['Content-Type: application/x-www-form-urlencoded'],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+        ]);
+        $body = curl_exec($curl);
+        $http_status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
+        $curl_error_number = curl_errno($curl);
+        curl_close($curl);
+
+        if ($body === false) {
+            error_log('reCAPTCHA verification request failed (cURL error ' . $curl_error_number . ').');
+            $this->respond(503, ['success' => false, 'message' => 'reCAPTCHA verification is temporarily unavailable. Try again later.']);
+        }
+        if ($http_status !== 200) {
+            error_log('reCAPTCHA verification returned HTTP ' . $http_status . '.');
+            $this->respond(503, ['success' => false, 'message' => 'reCAPTCHA verification is temporarily unavailable. Try again later.']);
+        }
+
+        $verification = json_decode($body, true);
+        if (!is_array($verification) || !array_key_exists('success', $verification)) {
+            error_log('reCAPTCHA returned an invalid verification response.');
+            $this->respond(503, ['success' => false, 'message' => 'reCAPTCHA verification is temporarily unavailable. Try again later.']);
+        }
+
+        $allowed_hostnames = array_values(array_filter(array_map(
+            static function ($hostname) {
+                return strtolower(trim($hostname));
+            },
+            explode(',', (string) rentease_env('RECAPTCHA_ALLOWED_HOSTNAMES', 'ryvaldez-frontend.onrender.com,localhost,127.0.0.1'))
+        )));
+        $verified_hostname = strtolower(trim((string) ($verification['hostname'] ?? '')));
+        if (empty($verification['success']) || $verified_hostname === '' || !in_array($verified_hostname, $allowed_hostnames, true)) {
+            $this->respond(422, ['success' => false, 'message' => 'The reCAPTCHA check failed. Complete it again and retry.']);
+        }
     }
 
     private function json_input()

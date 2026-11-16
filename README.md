@@ -39,6 +39,15 @@ Whether you are building a simple web application, a REST API, or a teaching pro
 
 For production deployments, set a persistent, randomly generated `APP_KEY` in the backend host's secret environment variables. Generate one with `php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"`; do not commit or share the value. Also set `APP_ENV=production`, `API_ALLOWED_ORIGINS` to the exact frontend origin, and `SESSION_COOKIE_SAMESITE=None` when the frontend and backend are on separate sites. Production session cookies are marked Secure automatically. Missing session configuration must be fixed in the backend host environment before account login can create a session.
 
+### reCAPTCHA on login and registration
+
+RentEase uses Google's reCAPTCHA v2 checkbox on login and registration, and verifies each response on the backend before authenticating or creating an account.
+
+1. In the [reCAPTCHA Admin Console](https://www.google.com/recaptcha/admin/create), register a **reCAPTCHA v2** site with the **"I'm not a robot" Checkbox** option. Add `ryvaldez-frontend.onrender.com` and `localhost` as allowed domains.
+2. Set the public site key as `VITE_RECAPTCHA_SITE_KEY` in the frontend host's build environment. The site key is embedded in the frontend bundle; it is not the secret key.
+3. Set the secret key as `RECAPTCHA_SECRET_KEY` in the backend host's environment. Keep it private.
+4. Set `RECAPTCHA_ALLOWED_HOSTNAMES` to the comma-separated hostnames registered for the widget, such as `ryvaldez-frontend.onrender.com,localhost`. Build/deploy the frontend and deploy the backend after setting these values.
+
 ### Email codes on Render
 
 The forgot-password and email-verification forms send a request to the backend when the user clicks **Send code**. To send from a Gmail account without a custom domain or SMTP, configure the Gmail API. The backend Docker image includes PHP cURL for its HTTPS requests.
