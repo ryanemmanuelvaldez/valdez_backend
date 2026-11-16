@@ -165,7 +165,6 @@ class RentalRequests extends Controller
                 ->where('owner_id', (int) $request['owner_id'])
                 ->row_array();
             $request['owner_gcash_qr_data'] = $payment_profile['gcash_qr_data'] ?? null;
-            $request['owner_maya_qr_data'] = $payment_profile['maya_qr_data'] ?? null;
             $owner = $this->call->database()->table('users')->select('phone')->where('id', (int) $request['owner_id'])->row_array();
             $request['owner_phone'] = $owner['phone'] ?? '';
             $initial_payment = $this->call->database()->table('rental_payments')

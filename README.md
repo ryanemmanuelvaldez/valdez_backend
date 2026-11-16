@@ -68,16 +68,9 @@ The forgot-password and email-verification forms send a request to the backend w
 
 Google classifies `gmail.send` as a sensitive OAuth scope. An unverified app may show a consent warning, and refresh tokens for an external app left in **Testing** can expire after seven days. Google may require OAuth app verification for a public production app. Gmail sending quotas also apply. Never put OAuth secrets or refresh tokens in frontend code or commit them to `.env` files.
 
-### Rent payments with Maya Checkout Sandbox
+### Manual rent payments
 
-New online checkouts use Maya's sandbox environment only. Sandbox payments are simulated and do not move real money. The backend verifies completed transactions with Maya before marking a rental payment as paid.
-
-1. Get Maya Checkout sandbox public and secret keys from Maya Manager or Maya Business Manager. See the [sandbox credentials guide](https://developers.maya.ph/reference/sandbox-credentials-and-cards).
-2. Set `MAYA_PUBLIC_KEY` and `MAYA_SECRET_KEY` in the backend host's environment. Keep both keys out of frontend variables and source control.
-3. Keep `FRONTEND_URL` set to the deployed RentEase frontend URL so Maya can return tenants to their payment page.
-4. Test with Maya's sandbox payment methods and credentials. Do not use production keys: this integration is deliberately fixed to the sandbox API. The Maya-hosted checkout shows only methods enabled for the Sandbox account; Maya documents that GCash and digital-wallet acceptance may require merchant enablement.
-
-Direct GCash/Maya wallet transfers using the owner's saved QR code or phone number, plus cash payments, remain available. The tenant uploads a receipt and the owner confirms the payment in the app. The old Xendit webhook remains only to finish any checkouts started before the provider switch; new checkouts are created through Maya Sandbox.
+RentEase does not process online checkout payments. Tenants pay the owner directly by GCash or cash, upload a JPG/JPEG receipt, and wait for the owner to review and confirm it in the Payments workspace. The backend marks a payment paid and activates the rental only after owner confirmation. Existing payment history and legacy provider-related database columns are retained; they are not used to start or verify new transactions.
 
 ---
 

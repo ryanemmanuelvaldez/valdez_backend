@@ -3,159 +3,6 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 
 class Payments extends Controller
 {
-    private const MAYA_SANDBOX_URL = 'https://pg-sandbox.paymaya.com';
-
-    public function checkout($request_id)
-    {
-        $this->require_method('POST');
-        $user = $this->current_user();
-        if (!$user) {
-            $this->respond(401, ['success' => false, 'message' => 'Sign in to pay for your rental.']);
-        }
-        if ($user['role'] === 'admin' || $user['account_type'] !== 'tenant') {
-            $this->respond(403, ['success' => false, 'message' => 'Only tenants can pay for a rental request.']);
-        }
-        $payment_method = 'maya';
-
-        $db = $this->call->database();
-        $rental_request = $db->table('rental_requests')
-            ->where('id', (int) $request_id)
-            ->where('tenant_id', (int) $user['id'])
-            ->row_array();
-        if (!$rental_request || $rental_request['status'] !== 'awaiting_payment') {
-            $this->respond(409, ['success' => false, 'message' => 'The owner must approve this request before payment is available.']);
-        }
-
-        $rental = $db->table('rentals')
-            ->where('id', (int) $rental_request['rental_id'])
-            ->where('status', 'published')
-            ->row_array();
-        if (!$rental) {
-            $this->respond(409, ['success' => false, 'message' => 'This rental is no longer available for payment. Contact RentEase support.']);
-        }
-
-        $amount_centavos = $this->money_to_centavos($rental['price'])
-            + $this->money_to_centavos($rental['security_deposit'] ?? '0.00');
-        if ($amount_centavos < 1 || $amount_centavos > 999999999999) {
-            $this->respond(422, ['success' => false, 'message' => 'The payment amount is outside the supported range. Contact RentEase support.']);
-        }
-
-        $payment = $db->table('rental_payments')
-            ->where('rental_request_id', (int) $request_id)
-            ->row_array();
-        if ($payment && $payment['status'] === 'paid') {
-            $this->respond(409, ['success' => false, 'message' => 'This rental request has already been paid.']);
-        }
-        if ($payment && $payment['status'] === 'pending' && !empty($payment['checkout_url'])) {
-            $this->respond(200, [
-                'success' => true,
-                'checkout_url' => $payment['checkout_url'],
-                'reused' => true,
-                'message' => 'Continue with your existing secure checkout.',
-            ]);
-        }
-        if ($payment && $payment['status'] === 'pending_owner_confirmation') {
-            $this->respond(409, ['success' => false, 'message' => 'Your physical payment is waiting for the owner to confirm it.']);
-        }
-        if ($amount_centavos > 999999900) {
-            $this->respond(422, ['success' => false, 'message' => 'Maya Sandbox supports payments up to PHP 9,999,999.00.']);
-        }
-        [$public_key] = $this->maya_configuration();
-        $reference_number = $payment && $payment['status'] === 'creating'
-            ? $payment['reference_number']
-            : 'MAYA-RENT-' . (int) $request_id . '-' . strtoupper(bin2hex(random_bytes(6)));
-        $payment_data = [
-            'rental_request_id' => (int) $request_id,
-            'tenant_id' => (int) $user['id'],
-            'rental_id' => (int) $rental['id'],
-            'reference_number' => $reference_number,
-            'checkout_session_id' => null,
-            'provider_payment_id' => null,
-            'checkout_url' => null,
-            'amount_centavos' => $amount_centavos,
-            'currency' => 'PHP',
-            'payment_method' => $payment_method,
-            'status' => 'creating',
-            'updated_at' => date('Y-m-d H:i:s'),
-        ];
-
-        if ($payment) {
-            $db->table('rental_payments')
-                ->where('id', (int) $payment['id'])
-                ->update($payment_data);
-        } else {
-            try {
-                $payment_data['created_at'] = date('Y-m-d H:i:s');
-                $db->table('rental_payments')->insert($payment_data);
-            } catch (PDOException $exception) {
-                $payment = $db->table('rental_payments')
-                    ->where('rental_request_id', (int) $request_id)
-                    ->row_array();
-                if ($payment && $payment['status'] === 'pending' && !empty($payment['checkout_url'])) {
-                    $this->respond(200, ['success' => true, 'checkout_url' => $payment['checkout_url'], 'reused' => true]);
-                }
-                if ($payment) {
-                    $this->respond(409, ['success' => false, 'message' => 'Your checkout is already being prepared. Please try again shortly.']);
-                }
-                throw $exception;
-            }
-        }
-
-        $frontend_url = rtrim(trim((string) rentease_env('FRONTEND_URL')), '/') . '/';
-        $frontend_parts = parse_url($frontend_url);
-        if (!$frontend_parts || !in_array(strtolower((string) ($frontend_parts['scheme'] ?? '')), ['http', 'https'], true)
-            || empty($frontend_parts['host'])) {
-            $db->table('rental_payments')
-                ->where('rental_request_id', (int) $request_id)
-                ->update(['status' => 'failed', 'updated_at' => date('Y-m-d H:i:s')]);
-            $this->respond(503, ['success' => false, 'message' => 'The payment return URL is not configured correctly. Contact RentEase support.']);
-        }
-
-        $checkout = $this->create_maya_checkout(
-            $amount_centavos,
-            $reference_number,
-            'First month rent and security deposit',
-            $frontend_url . '?payment=success&request_id=' . (int) $request_id . '#tenant/payments',
-            $frontend_url . '?payment=failure&request_id=' . (int) $request_id . '#tenant/payments',
-            $frontend_url . '?payment=cancelled&request_id=' . (int) $request_id . '#tenant/payments',
-            $public_key
-        );
-        if (!$checkout['success']) {
-            error_log('Maya Sandbox checkout creation failed for rental request ' . (int) $request_id . ' (HTTP ' . $checkout['http_status'] . ').');
-            $db->table('rental_payments')
-                ->where('rental_request_id', (int) $request_id)
-                ->update(['status' => 'failed', 'updated_at' => date('Y-m-d H:i:s')]);
-            $this->respond(502, ['success' => false, 'message' => 'Maya Sandbox could not start checkout. Check the sandbox keys and try again.']);
-        }
-
-        $session = $checkout['body'];
-        $session_id = (string) ($session['checkoutId'] ?? '');
-        $checkout_url = (string) ($session['redirectUrl'] ?? '');
-        if ($session_id === '' || !$this->is_valid_maya_checkout_url($checkout_url)) {
-            $db->table('rental_payments')
-                ->where('rental_request_id', (int) $request_id)
-                ->update(['status' => 'failed', 'updated_at' => date('Y-m-d H:i:s')]);
-            error_log('Maya Sandbox returned an invalid checkout response for rental request ' . (int) $request_id . '.');
-            $this->respond(502, ['success' => false, 'message' => 'Maya Sandbox did not return a valid checkout link. Please try again.']);
-        }
-
-        $db->table('rental_payments')
-            ->where('rental_request_id', (int) $request_id)
-            ->update([
-                'checkout_session_id' => $session_id,
-                'checkout_url' => $checkout_url,
-                'status' => 'pending',
-                'updated_at' => date('Y-m-d H:i:s'),
-            ]);
-
-        $this->respond(200, [
-            'success' => true,
-            'checkout_url' => $checkout_url,
-            'reused' => false,
-            'message' => 'Maya Sandbox checkout is ready.',
-        ]);
-    }
-
     public function mine()
     {
         $this->require_method('GET');
@@ -233,7 +80,6 @@ class Payments extends Controller
                             || strpos($initial_reference, 'CASH-') === 0);
                 }
                 $installment['owner_gcash_qr_data'] = $owner_payment_profile['gcash_qr_data'] ?? null;
-                $installment['owner_maya_qr_data'] = $owner_payment_profile['maya_qr_data'] ?? null;
                 $installment['owner_phone'] = $owner['phone'] ?? '';
                 $schedule[] = $installment;
                 if ($installment['status'] === 'paid') {
@@ -245,7 +91,7 @@ class Payments extends Controller
                                 'rental_title' => $rental['title'],
                                 'description' => 'First month rent + security deposit',
                                 'amount_centavos' => (int) $initial_payment['amount_centavos'],
-                                'payment_method' => $initial_payment['payment_method'] ?? 'online',
+                                    'payment_method' => $initial_payment['payment_method'] ?? 'manual',
                                 'reference_number' => $initial_payment['reference_number'],
                                 'paid_at' => $initial_payment['paid_at'],
                                 'owner_confirmed' => ($initial_payment['payment_method'] ?? '') === 'cash'
@@ -263,7 +109,7 @@ class Payments extends Controller
                             'rental_title' => $rental['title'],
                             'description' => 'Rent installment #' . $installment['installment_number'],
                             'amount_centavos' => (int) $installment['amount_centavos'],
-                            'payment_method' => $installment['payment_method'] ?? 'online',
+                            'payment_method' => $installment['payment_method'] ?? 'manual',
                             'reference_number' => $installment['reference_number'],
                             'paid_at' => $installment['paid_at'],
                             'owner_confirmed' => ($installment['payment_method'] ?? '') === 'cash'
@@ -297,232 +143,6 @@ class Payments extends Controller
         ]);
     }
 
-    public function checkout_installment($installment_id)
-    {
-        $this->require_method('POST');
-        $user = $this->current_user();
-        if (!$user) $this->respond(401, ['success' => false, 'message' => 'Sign in to pay rent.']);
-        if ($user['role'] === 'admin' || $user['account_type'] !== 'tenant') {
-            $this->respond(403, ['success' => false, 'message' => 'Only tenants can pay rent installments.']);
-        }
-        $payment_method = 'maya';
-
-        $db = $this->call->database();
-        $installment = $db->table('rental_installments')
-            ->where('id', (int) $installment_id)
-            ->where('tenant_id', (int) $user['id'])
-            ->row_array();
-        if (!$installment) $this->respond(404, ['success' => false, 'message' => 'Rent installment not found.']);
-        if ($installment['status'] === 'paid') $this->respond(409, ['success' => false, 'message' => 'This rent installment is already paid.']);
-        if ($installment['status'] === 'pending' && !empty($installment['checkout_url'])) {
-            $this->respond(200, ['success' => true, 'checkout_url' => $installment['checkout_url'], 'reused' => true]);
-        }
-        if ($installment['status'] === 'pending_owner_confirmation') {
-            $this->respond(409, ['success' => false, 'message' => 'Your physical payment is waiting for the owner to confirm it.']);
-        }
-        if (!in_array($installment['status'], ['due', 'overdue', 'upcoming', 'creating', 'pending'], true)) {
-            $this->respond(409, ['success' => false, 'message' => 'This rent installment cannot be paid in its current state.']);
-        }
-        if ((int) $installment['amount_centavos'] > 999999900) {
-            $this->respond(422, ['success' => false, 'message' => 'Maya Sandbox supports payments up to PHP 9,999,999.00.']);
-        }
-        [$public_key] = $this->maya_configuration();
-        $rental_request = $db->table('rental_requests')
-            ->where('id', (int) $installment['rental_request_id'])
-            ->where('tenant_id', (int) $user['id'])
-            ->where('status', 'approved')
-            ->row_array();
-        $rental = $db->table('rentals')->where('id', (int) $installment['rental_id'])->row_array();
-        if (!$rental_request || !$rental) $this->respond(409, ['success' => false, 'message' => 'The rental agreement is no longer active.']);
-
-        $reference = $installment['status'] === 'creating' && !empty($installment['reference_number'])
-            ? $installment['reference_number']
-            : 'MAYA-RENT-' . (int) $installment['id'] . '-' . strtoupper(bin2hex(random_bytes(6)));
-        $db->table('rental_installments')->where('id', (int) $installment['id'])->update([
-            'status' => 'creating',
-            'payment_method' => $payment_method,
-            'reference_number' => $reference,
-            'checkout_session_id' => null,
-            'checkout_url' => null,
-            'provider_payment_id' => null,
-            'updated_at' => date('Y-m-d H:i:s'),
-        ]);
-        $frontend_url = rtrim(trim((string) rentease_env('FRONTEND_URL')), '/') . '/';
-        $frontend_parts = parse_url($frontend_url);
-        if (!$frontend_parts || !in_array(strtolower((string) ($frontend_parts['scheme'] ?? '')), ['http', 'https'], true)
-            || empty($frontend_parts['host'])) {
-            $db->table('rental_installments')->where('id', (int) $installment['id'])->update([
-                'status' => $this->installment_status_for_due_date($installment['due_date']),
-                'updated_at' => date('Y-m-d H:i:s'),
-            ]);
-            $this->respond(503, ['success' => false, 'message' => 'The payment return URL is not configured correctly.']);
-        }
-        $checkout = $this->create_maya_checkout(
-            (int) $installment['amount_centavos'],
-            $reference,
-            'Rent installment ' . (int) $installment['installment_number'],
-            $frontend_url . '?payment=success&request_id=' . (int) $rental_request['id'] . '&installment_id=' . (int) $installment['id'] . '#tenant/payments',
-            $frontend_url . '?payment=failure&request_id=' . (int) $rental_request['id'] . '&installment_id=' . (int) $installment['id'] . '#tenant/payments',
-            $frontend_url . '?payment=cancelled&request_id=' . (int) $rental_request['id'] . '&installment_id=' . (int) $installment['id'] . '#tenant/payments',
-            $public_key
-        );
-        if (!$checkout['success']) {
-            error_log('Maya Sandbox rent installment checkout failed for installment ' . (int) $installment['id'] . ' (HTTP ' . $checkout['http_status'] . ').');
-            $db->table('rental_installments')->where('id', (int) $installment['id'])->update([
-                'status' => $this->installment_status_for_due_date($installment['due_date']),
-                'updated_at' => date('Y-m-d H:i:s'),
-            ]);
-            $this->respond(502, ['success' => false, 'message' => 'Maya Sandbox could not start rent checkout. Check the sandbox keys and try again.']);
-        }
-        $session = $checkout['body'];
-        $session_id = (string) ($session['checkoutId'] ?? '');
-        $checkout_url = (string) ($session['redirectUrl'] ?? '');
-        if ($session_id === '' || !$this->is_valid_maya_checkout_url($checkout_url)) {
-            $db->table('rental_installments')->where('id', (int) $installment['id'])->update([
-                'status' => $this->installment_status_for_due_date($installment['due_date']),
-                'updated_at' => date('Y-m-d H:i:s'),
-            ]);
-            error_log('Maya Sandbox returned an invalid checkout response for installment ' . (int) $installment['id'] . '.');
-            $this->respond(502, ['success' => false, 'message' => 'Maya Sandbox returned an invalid checkout link.']);
-        }
-        $db->table('rental_installments')->where('id', (int) $installment['id'])->update([
-            'checkout_session_id' => $session_id,
-            'checkout_url' => $checkout_url,
-            'status' => 'pending',
-            'updated_at' => date('Y-m-d H:i:s'),
-        ]);
-        $this->respond(200, ['success' => true, 'checkout_url' => $checkout_url, 'reused' => false, 'message' => 'Maya Sandbox checkout is ready.']);
-    }
-
-    public function verify_checkout()
-    {
-        $this->require_method('POST');
-        $user = $this->current_user();
-        if (!$user) $this->respond(401, ['success' => false, 'message' => 'Sign in to verify your payment.']);
-        if ($user['role'] === 'admin' || $user['account_type'] !== 'tenant') {
-            $this->respond(403, ['success' => false, 'message' => 'Only tenants can verify rental payments.']);
-        }
-
-        $input = $this->json_input();
-        $request_id = (int) ($input['request_id'] ?? 0);
-        $installment_id = (int) ($input['installment_id'] ?? 0);
-        if ($request_id < 1 && $installment_id < 1) {
-            $this->respond(422, ['success' => false, 'message' => 'A rental request or installment ID is required.']);
-        }
-
-        $db = $this->call->database();
-        if ($installment_id > 0) {
-            $record_type = 'installment';
-            $record = $db->table('rental_installments')
-                ->where('id', $installment_id)
-                ->where('tenant_id', (int) $user['id'])
-                ->row_array();
-        } else {
-            $record_type = 'request';
-            $record = $db->table('rental_payments')
-                ->where('rental_request_id', $request_id)
-                ->where('tenant_id', (int) $user['id'])
-                ->row_array();
-        }
-        if (!$record) $this->respond(404, ['success' => false, 'message' => 'Payment record not found.']);
-
-        if (strpos((string) ($record['reference_number'] ?? ''), 'MAYA-RENT-') !== 0) {
-            $this->respond(200, ['success' => true, 'status' => (string) $record['status']]);
-        }
-        if ($record['status'] === 'paid') {
-            if ($record_type === 'request') {
-                $this->finalize_initial_payment($record, 'maya', $record['provider_payment_id'] ?? null);
-            }
-            $this->respond(200, ['success' => true, 'status' => 'paid']);
-        }
-        if ($record['status'] !== 'pending' || empty($record['checkout_session_id'])) {
-            $this->respond(200, ['success' => true, 'status' => (string) $record['status']]);
-        }
-
-        [, $secret_key] = $this->maya_configuration();
-        $reference = (string) $record['reference_number'];
-        $lookup = $this->maya_request(
-            'GET',
-            self::MAYA_SANDBOX_URL . '/payments/v1/payment-rrns/' . rawurlencode($reference),
-            $secret_key
-        );
-        if (!$lookup['success']) {
-            error_log('Maya Sandbox payment lookup failed for reference ' . $reference . ' (HTTP ' . $lookup['http_status'] . ').');
-            $this->respond(502, ['success' => false, 'message' => 'Maya Sandbox could not verify the payment yet. Please try again.']);
-        }
-
-        $transactions = $lookup['body'];
-        if (isset($transactions['requestReferenceNumber'])) {
-            $transactions = [$transactions];
-        }
-        if (!is_array($transactions)) {
-            error_log('Maya Sandbox returned an invalid payment lookup response for reference ' . $reference . '.');
-            $this->respond(502, ['success' => false, 'message' => 'Maya Sandbox returned an invalid payment response. Please try again.']);
-        }
-
-        $verified_payment = null;
-        foreach ($transactions as $transaction) {
-            if (is_array($transaction)
-                && (string) ($transaction['requestReferenceNumber'] ?? '') === $reference) {
-                $verified_payment = $transaction;
-                if (($transaction['isPaid'] ?? false) === true) break;
-            }
-        }
-        if (!$verified_payment) {
-            $this->respond(200, ['success' => true, 'status' => 'pending']);
-        }
-
-        if (($verified_payment['isPaid'] ?? false) === true) {
-            $provider_payment_id = trim((string) ($verified_payment['id'] ?? ''));
-            $paid_currency = strtoupper((string) ($verified_payment['currency'] ?? ''));
-            $paid_centavos = isset($verified_payment['amount'])
-                ? (int) round((float) $verified_payment['amount'] * 100)
-                : 0;
-            $expected_centavos = (int) $record['amount_centavos'];
-            if ($provider_payment_id === '' || $paid_currency !== 'PHP' || $paid_centavos !== $expected_centavos) {
-                error_log('Maya Sandbox payment details did not match the stored amount for reference ' . $reference . '.');
-                $this->respond(422, ['success' => false, 'message' => 'Maya payment amount or currency did not match this rental payment.']);
-            }
-
-            if ($record_type === 'installment') {
-                $db->table('rental_installments')
-                    ->where('id', (int) $record['id'])
-                    ->where('status', 'pending')
-                    ->update([
-                        'status' => 'paid',
-                        'payment_method' => 'maya',
-                        'provider_payment_id' => $provider_payment_id,
-                        'paid_at' => date('Y-m-d H:i:s'),
-                        'updated_at' => date('Y-m-d H:i:s'),
-                    ]);
-            } else {
-                $this->finalize_initial_payment($record, 'maya', $provider_payment_id);
-            }
-            $this->respond(200, ['success' => true, 'status' => 'paid']);
-        }
-
-        $provider_status = strtoupper((string) ($verified_payment['status'] ?? ''));
-        if (in_array($provider_status, ['PAYMENT_FAILED', 'PAYMENT_EXPIRED', 'PAYMENT_CANCELLED', 'PAYMENT_INVALID', 'AUTH_FAILED'], true)) {
-            if ($record_type === 'installment') {
-                $db->table('rental_installments')
-                    ->where('id', (int) $record['id'])
-                    ->where('status', 'pending')
-                    ->update([
-                        'status' => $this->installment_status_for_due_date($record['due_date']),
-                        'updated_at' => date('Y-m-d H:i:s'),
-                    ]);
-            } else {
-                $db->table('rental_payments')
-                    ->where('id', (int) $record['id'])
-                    ->where('status', 'pending')
-                    ->update(['status' => 'failed', 'updated_at' => date('Y-m-d H:i:s')]);
-            }
-            $this->respond(200, ['success' => true, 'status' => 'failed']);
-        }
-
-        $this->respond(200, ['success' => true, 'status' => 'pending']);
-    }
-
     public function owner_payment_profile()
     {
         $this->require_method('GET');
@@ -534,7 +154,6 @@ class Payments extends Controller
             'success' => true,
             'profile' => [
                 'gcash_qr_data' => $profile['gcash_qr_data'] ?? null,
-                'maya_qr_data' => $profile['maya_qr_data'] ?? null,
                 'owner_phone' => $user['phone'] ?? '',
             ],
         ]);
@@ -546,9 +165,8 @@ class Payments extends Controller
         $user = $this->require_owner();
         $input = $this->json_input();
         $gcash_qr = $this->validate_qr_image($input['gcash_qr_data'] ?? null, 'GCash');
-        $maya_qr = $this->validate_qr_image($input['maya_qr_data'] ?? null, 'Maya');
-        if ($gcash_qr === null && $maya_qr === null && trim((string) ($user['phone'] ?? '')) === '') {
-            $this->respond(422, ['success' => false, 'message' => 'Add a mobile number to your account or upload an official wallet QR code.']);
+        if ($gcash_qr === null && trim((string) ($user['phone'] ?? '')) === '') {
+            $this->respond(422, ['success' => false, 'message' => 'Add a mobile number to your account or upload your official GCash QR code.']);
         }
 
         $db = $this->call->database();
@@ -557,7 +175,6 @@ class Payments extends Controller
             ->row_array();
         $values = [
             'gcash_qr_data' => $gcash_qr,
-            'maya_qr_data' => $maya_qr,
             'updated_at' => date('Y-m-d H:i:s'),
         ];
         if ($profile) {
@@ -594,9 +211,6 @@ class Payments extends Controller
             ->where('rental_request_id', (int) $request['id'])
             ->row_array();
         if ($payment && $payment['status'] === 'paid') $this->respond(409, ['success' => false, 'message' => 'This move-in payment is already recorded as paid.']);
-        if ($payment && in_array($payment['status'], ['pending', 'creating'], true)) {
-            $this->respond(409, ['success' => false, 'message' => 'An online checkout is already in progress. Finish or cancel it before reporting a wallet transfer.']);
-        }
         if ($payment && $payment['status'] === 'pending_owner_confirmation'
             && $this->receipt_is_attached('rental_payments', (int) $payment['id'])) {
             $this->respond(200, ['success' => true, 'message' => 'Your wallet transfer is already waiting for the owner to confirm it.']);
@@ -647,9 +261,6 @@ class Payments extends Controller
             ->where('rental_request_id', (int) $request['id'])
             ->row_array();
         if ($payment && $payment['status'] === 'paid') $this->respond(409, ['success' => false, 'message' => 'This move-in payment is already recorded as paid.']);
-        if ($payment && in_array($payment['status'], ['pending', 'creating'], true)) {
-            $this->respond(409, ['success' => false, 'message' => 'An online checkout is in progress. Finish or cancel it before reporting a cash payment.']);
-        }
         if ($payment && $payment['status'] === 'pending_owner_confirmation'
             && $this->receipt_is_attached('rental_payments', (int) $payment['id'])) {
             $this->respond(409, ['success' => false, 'message' => 'A payment report is already waiting for owner confirmation.']);
@@ -700,8 +311,8 @@ class Payments extends Controller
             && $this->receipt_is_attached('rental_installments', (int) $installment['id'])) {
             $this->respond(200, ['success' => true, 'message' => 'Your wallet transfer is already waiting for the owner to confirm it.']);
         }
-        if (!in_array($installment['status'], ['due', 'overdue', 'upcoming', 'pending_owner_confirmation'], true)) {
-            $this->respond(409, ['success' => false, 'message' => 'Finish or cancel the current checkout before reporting a physical payment.']);
+        if (!in_array($installment['status'], ['due', 'overdue', 'upcoming', 'pending_owner_confirmation', 'pending', 'creating'], true)) {
+            $this->respond(409, ['success' => false, 'message' => 'This rent installment cannot accept a payment report in its current state.']);
         }
         $request = $db->table('rental_requests')
             ->where('id', (int) $installment['rental_request_id'])
@@ -746,8 +357,8 @@ class Payments extends Controller
             && $this->receipt_is_attached('rental_installments', (int) $installment['id'])) {
             $this->respond(409, ['success' => false, 'message' => 'A payment report is already waiting for owner confirmation.']);
         }
-        if (!in_array($installment['status'], ['due', 'overdue', 'upcoming', 'pending_owner_confirmation'], true)) {
-            $this->respond(409, ['success' => false, 'message' => 'This installment cannot accept a cash payment report while another checkout is in progress.']);
+        if (!in_array($installment['status'], ['due', 'overdue', 'upcoming', 'pending_owner_confirmation', 'pending', 'creating'], true)) {
+            $this->respond(409, ['success' => false, 'message' => 'This installment cannot accept a cash payment report in its current state.']);
         }
         $request = $db->table('rental_requests')
             ->where('id', (int) $installment['rental_request_id'])
@@ -867,7 +478,6 @@ class Payments extends Controller
             'payments' => $items,
             'profile' => [
                 'gcash_qr_data' => $profile['gcash_qr_data'] ?? null,
-                'maya_qr_data' => $profile['maya_qr_data'] ?? null,
                 'owner_phone' => $owner['phone'] ?? '',
             ],
         ]);
@@ -1052,107 +662,7 @@ class Payments extends Controller
         $this->respond(200, ['success' => true, 'top_rentals' => $ratings]);
     }
 
-    public function xendit_webhook()
-    {
-        $this->require_method('POST');
-        $webhook_token = trim((string) rentease_env('XENDIT_WEBHOOK_TOKEN'));
-        if ($webhook_token === '') {
-            $this->respond(503, ['success' => false, 'message' => 'Xendit webhook is not configured.']);
-        }
-        $headers = function_exists('getallheaders') ? getallheaders() : [];
-        $provided_token = (string) ($_SERVER['HTTP_X_CALLBACK_TOKEN'] ?? '');
-        foreach ($headers as $name => $value) {
-            if (strcasecmp($name, 'x-callback-token') === 0) {
-                $provided_token = (string) $value;
-                break;
-            }
-        }
-        if ($provided_token === '' || !hash_equals($webhook_token, $provided_token)) {
-            $this->respond(401, ['success' => false, 'message' => 'Invalid Xendit webhook token.']);
-        }
-
-        $event = json_decode(file_get_contents('php://input'), true);
-        if (json_last_error() !== JSON_ERROR_NONE || !is_array($event)) {
-            $this->respond(400, ['success' => false, 'message' => 'Invalid Xendit webhook payload.']);
-        }
-        $event_type = (string) ($event['event'] ?? '');
-        if (!in_array($event_type, ['payment.capture', 'payment_request.capture'], true)) {
-            $this->respond(200, ['success' => true, 'message' => 'Event ignored.']);
-        }
-        $webhook_payment = $event['data'] ?? $event;
-        $payment_id = (string) ($webhook_payment['payment_id'] ?? $webhook_payment['id'] ?? '');
-        $reference = (string) ($webhook_payment['reference_id'] ?? '');
-        if ($payment_id === '' || $reference === '') {
-            $this->respond(422, ['success' => false, 'message' => 'Webhook is missing the Xendit payment ID or reference.']);
-        }
-
-        [$secret_key] = $this->xendit_configuration();
-        $lookup = $this->xendit_request('GET', 'https://api.xendit.co/v3/payments/' . rawurlencode($payment_id), $secret_key);
-        if (!$lookup['success']) {
-            error_log('Xendit payment verification failed for payment ' . $payment_id . ' (HTTP ' . $lookup['http_status'] . ').');
-            $this->respond(502, ['success' => false, 'message' => 'Xendit payment could not be verified.']);
-        }
-        $verified = $lookup['body'];
-        if (($verified['status'] ?? '') !== 'SUCCEEDED'
-            || (string) ($verified['reference_id'] ?? '') !== $reference
-            || strtoupper((string) ($verified['currency'] ?? '')) !== 'PHP') {
-            $this->respond(422, ['success' => false, 'message' => 'Xendit payment status, reference, or currency does not match.']);
-        }
-        $capture_amount = 0.0;
-        foreach (($verified['captures'] ?? []) as $capture) {
-            $capture_amount += (float) ($capture['capture_amount'] ?? 0);
-        }
-        if ($capture_amount <= 0) {
-            $capture_amount = (float) ($verified['request_amount'] ?? 0);
-        }
-        $paid_centavos = (int) round($capture_amount * 100);
-
-        $db = $this->call->database();
-        $installment = $db->table('rental_installments')
-            ->where('reference_number', $reference)
-            ->where('checkout_session_id', (string) ($verified['payment_request_id'] ?? ''))
-            ->row_array();
-        if ($installment) {
-            if ((int) $installment['amount_centavos'] !== $paid_centavos) {
-                error_log('Xendit rent installment amount mismatch for reference ' . $reference . '.');
-                $this->respond(422, ['success' => false, 'message' => 'Xendit amount does not match the rent installment.']);
-            }
-            if ($installment['status'] === 'paid') $this->respond(200, ['success' => true, 'message' => 'Rent installment was already recorded.']);
-            if ($installment['status'] !== 'pending') $this->respond(409, ['success' => false, 'message' => 'Rent installment is not awaiting online payment.']);
-            $db->table('rental_installments')->where('id', (int) $installment['id'])->where('status', 'pending')->update([
-                'status' => 'paid',
-                'payment_method' => $installment['payment_method'] === 'maya' ? 'maya' : 'gcash',
-                'provider_payment_id' => $payment_id,
-                'paid_at' => date('Y-m-d H:i:s'),
-                'updated_at' => date('Y-m-d H:i:s'),
-            ]);
-            $this->respond(200, ['success' => true, 'message' => 'Rent installment recorded.']);
-        }
-
-        $payment = $db->table('rental_payments')
-            ->where('reference_number', $reference)
-            ->where('checkout_session_id', (string) ($verified['payment_request_id'] ?? ''))
-            ->row_array();
-        if (!$payment) $this->respond(404, ['success' => false, 'message' => 'Payment reference was not found.']);
-        if ((int) $payment['amount_centavos'] !== $paid_centavos) {
-            error_log('Xendit initial payment amount mismatch for reference ' . $reference . '.');
-            $this->respond(422, ['success' => false, 'message' => 'Xendit amount does not match the rental request.']);
-        }
-        if ($payment['status'] === 'paid') {
-            $this->finalize_initial_payment($payment, $payment['payment_method'] === 'maya' ? 'maya' : 'gcash', $payment_id);
-            $this->respond(200, ['success' => true, 'message' => 'Payment was already recorded and the rental status was synchronized.']);
-        }
-        if ($payment['status'] !== 'pending') $this->respond(409, ['success' => false, 'message' => 'Payment is not awaiting online confirmation.']);
-        $schedule_ready = $this->finalize_initial_payment($payment, $payment['payment_method'] === 'maya' ? 'maya' : 'gcash', $payment_id);
-        $this->respond(200, [
-            'success' => true,
-            'message' => $schedule_ready
-                ? 'Payment recorded and rental confirmed.'
-                : 'Payment recorded and rental confirmed. The rent schedule is still being prepared; refresh shortly.',
-        ]);
-    }
-
-    private function finalize_initial_payment(array $payment, $method, $provider_payment_id = null, $manage_transaction = true)
+    private function finalize_initial_payment(array $payment, $method, $manage_transaction = true)
     {
         $db = $this->call->database();
         $request = $db->table('rental_requests')
@@ -1187,7 +697,7 @@ class Payments extends Controller
         $db->table('rental_payments')->where('id', (int) $payment['id'])->update([
             'status' => 'paid',
             'payment_method' => $method,
-            'provider_payment_id' => $provider_payment_id,
+            'provider_payment_id' => null,
             'paid_at' => $payment['paid_at'] ?? date('Y-m-d H:i:s'),
             'updated_at' => date('Y-m-d H:i:s'),
         ]);
@@ -1223,18 +733,13 @@ class Payments extends Controller
         }
     }
 
-    private function validate_online_method($method)
-    {
-        $method = strtolower(trim((string) $method));
-        if (!in_array($method, ['gcash', 'maya'], true)) {
-            $this->respond(422, ['success' => false, 'message' => 'Choose GCash or Maya for online payment.']);
-        }
-        return $method;
-    }
-
     private function validate_wallet_method($method)
     {
-        return $this->validate_online_method($method);
+        $method = strtolower(trim((string) $method));
+        if ($method !== 'gcash') {
+            $this->respond(422, ['success' => false, 'message' => 'Choose GCash for wallet payment.']);
+        }
+        return $method;
     }
 
     private function validate_receipt_image($data)
@@ -1242,7 +747,7 @@ class Payments extends Controller
         if (!is_string($data)
             || strlen($data) > 2800000
             || !preg_match('#^data:image/jpeg;base64,([A-Za-z0-9+/]+={0,2})$#', $data, $matches)) {
-            $this->respond(422, ['success' => false, 'message' => 'Upload a JPG screenshot of the GCash or Maya receipt (up to 2 MB).']);
+            $this->respond(422, ['success' => false, 'message' => 'Upload a JPG/JPEG screenshot or photo of the GCash transfer or cash receipt (up to 2 MB).']);
         }
         $image = base64_decode($matches[1], true);
         if ($image === false || strlen($image) < 1 || strlen($image) > 2 * 1024 * 1024) {
@@ -1279,7 +784,7 @@ class Payments extends Controller
         $user = $this->current_user();
         if (!$user) $this->respond(401, ['success' => false, 'message' => 'Sign in as a tenant to continue.']);
         if ($user['role'] === 'admin' || $user['account_type'] !== 'tenant') {
-            $this->respond(403, ['success' => false, 'message' => 'Only tenants can submit physical rent payments.']);
+            $this->respond(403, ['success' => false, 'message' => 'Only tenants can submit manual rent payments.']);
         }
         return $user;
     }
@@ -1292,117 +797,6 @@ class Payments extends Controller
             $this->respond(403, ['success' => false, 'message' => 'A verified property owner account is required.']);
         }
         return $user;
-    }
-
-    private function maya_configuration()
-    {
-        $public_key = trim((string) rentease_env('MAYA_PUBLIC_KEY'));
-        $secret_key = trim((string) rentease_env('MAYA_SECRET_KEY'));
-        if ($public_key === '' || $secret_key === '') {
-            $this->respond(503, ['success' => false, 'message' => 'Maya Sandbox is not configured. Add MAYA_PUBLIC_KEY and MAYA_SECRET_KEY to the backend environment.']);
-        }
-        return [$public_key, $secret_key];
-    }
-
-    private function create_maya_checkout($amount_centavos, $reference, $name, $success_url, $failure_url, $cancel_url, $public_key)
-    {
-        $amount = (float) number_format(((int) $amount_centavos) / 100, 2, '.', '');
-        $payload = [
-            'totalAmount' => [
-                'currency' => 'PHP',
-                'value' => $amount,
-            ],
-            'items' => [[
-                'name' => $name,
-                'code' => $reference,
-                'quantity' => 1,
-                'amount' => [
-                    'value' => $amount,
-                    'details' => ['subtotal' => $amount],
-                ],
-                'totalAmount' => ['value' => $amount],
-            ]],
-            'redirectUrl' => [
-                'success' => $success_url,
-                'failure' => $failure_url,
-                'cancel' => $cancel_url,
-            ],
-            'requestReferenceNumber' => $reference,
-        ];
-        return $this->maya_request(
-            'POST',
-            self::MAYA_SANDBOX_URL . '/checkout/v1/checkouts',
-            $public_key,
-            $payload
-        );
-    }
-
-    private function is_valid_maya_checkout_url($url)
-    {
-        $parts = parse_url((string) $url);
-        if (!$parts
-            || strtolower((string) ($parts['scheme'] ?? '')) !== 'https'
-            || empty($parts['host'])
-            || isset($parts['user'])
-            || isset($parts['pass'])) {
-            return false;
-        }
-        $host = strtolower((string) $parts['host']);
-        return (bool) preg_match('/(^|\.)paymaya\.com$/i', $host)
-            || (bool) preg_match('/(^|\.)maya\.ph$/i', $host);
-    }
-
-    private function maya_request($method, $url, $api_key, array $payload = [])
-    {
-        $curl = curl_init($url);
-        if ($curl === false) {
-            return ['success' => false, 'http_status' => 0, 'body' => []];
-        }
-        $headers = [
-            'Authorization: Basic ' . base64_encode($api_key . ':'),
-            'Accept: application/json',
-        ];
-        $options = [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_CUSTOMREQUEST => $method,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_CONNECTTIMEOUT => 10,
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_SSL_VERIFYPEER => true,
-            CURLOPT_SSL_VERIFYHOST => 2,
-        ];
-        if ($method !== 'GET') {
-            $headers[] = 'Content-Type: application/json';
-            $options[CURLOPT_HTTPHEADER] = $headers;
-            $options[CURLOPT_POSTFIELDS] = json_encode($payload, JSON_UNESCAPED_SLASHES);
-        }
-        curl_setopt_array($curl, $options);
-        $response_body = curl_exec($curl);
-        $http_status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
-        $curl_error = curl_error($curl);
-        curl_close($curl);
-
-        if ($response_body === false) {
-            error_log('Maya Sandbox API connection failed: ' . $curl_error);
-            return ['success' => false, 'http_status' => $http_status, 'body' => []];
-        }
-        $decoded = json_decode($response_body, true);
-        return [
-            'success' => $http_status >= 200 && $http_status < 300 && is_array($decoded),
-            'http_status' => $http_status,
-            'body' => is_array($decoded) ? $decoded : [],
-        ];
-    }
-
-    private function xendit_configuration()
-    {
-        $mode = (string) rentease_env('XENDIT_MODE', 'test');
-        $secret_key = trim((string) rentease_env('XENDIT_SECRET_KEY'));
-        $webhook_token = trim((string) rentease_env('XENDIT_WEBHOOK_TOKEN'));
-        if (!in_array($mode, ['test', 'live'], true) || $secret_key === '' || $webhook_token === '') {
-            $this->respond(503, ['success' => false, 'message' => 'Legacy Xendit webhook verification is not configured.']);
-        }
-        return [$secret_key, $webhook_token, $mode];
     }
 
     private function ensure_installments(array $rental_request, array $rental)
@@ -1522,7 +916,7 @@ class Payments extends Controller
     {
         return $this->call->database()->raw(
             'SELECT id, rental_request_id, tenant_id, rental_id, installment_number, due_date, amount_centavos, status, payment_method, payment_note, '
-            . 'reference_number, checkout_session_id, checkout_url, provider_payment_id, paid_at, created_at, updated_at, '
+            . 'reference_number, paid_at, created_at, updated_at, '
             . 'receipt_image IS NOT NULL AS receipt_available FROM rental_installments WHERE rental_request_id = ? ORDER BY installment_number ASC',
             [(int) $request_id]
         )->fetchAll(PDO::FETCH_ASSOC);
@@ -1537,47 +931,6 @@ class Payments extends Controller
             'SELECT receipt_image IS NOT NULL FROM `' . $table . '` WHERE id = ?',
             [(int) $id]
         )->fetchColumn();
-    }
-
-    private function xendit_request($method, $url, $secret_key, array $payload = [], $idempotency_key = '')
-    {
-        $curl = curl_init($url);
-        if ($curl === false) {
-            return ['success' => false, 'http_status' => 0, 'body' => []];
-        }
-        $headers = [
-            'Authorization: Basic ' . base64_encode($secret_key . ':'),
-            'Accept: application/json',
-        ];
-        $options = [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_CUSTOMREQUEST => $method,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_CONNECTTIMEOUT => 10,
-            CURLOPT_TIMEOUT => 30,
-        ];
-        if ($method !== 'GET') {
-            $headers[] = 'Content-Type: application/json';
-            if ($idempotency_key !== '') $headers[] = 'Idempotency-Key: ' . $idempotency_key;
-            $options[CURLOPT_HTTPHEADER] = $headers;
-            $options[CURLOPT_POSTFIELDS] = json_encode($payload, JSON_UNESCAPED_SLASHES);
-        }
-        curl_setopt_array($curl, $options);
-        $response_body = curl_exec($curl);
-        $http_status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
-        $curl_error = curl_error($curl);
-        curl_close($curl);
-
-        if ($response_body === false) {
-            error_log('Xendit API connection failed: ' . $curl_error);
-            return ['success' => false, 'http_status' => $http_status, 'body' => []];
-        }
-        $decoded = json_decode($response_body, true);
-        return [
-            'success' => $http_status >= 200 && $http_status < 300 && is_array($decoded),
-            'http_status' => $http_status,
-            'body' => is_array($decoded) ? $decoded : [],
-        ];
     }
 
     private function money_to_centavos($amount)
