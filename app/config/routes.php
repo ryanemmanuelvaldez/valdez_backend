@@ -61,6 +61,7 @@ $router->post('/api/listings', 'Listings::create');
 $router->post('/api/listings/{id}/requests', 'RentalRequests::create');
 $router->get('/api/tenant/requests', 'RentalRequests::mine');
 $router->post('/api/tenant/requests/{id}/checkout', 'Payments::checkout');
+$router->post('/api/tenant/payments/verify-checkout', 'Payments::verify_checkout');
 $router->get('/api/tenant/payments', 'Payments::mine');
 $router->get('/api/tenant/installments', 'Payments::installments');
 $router->post('/api/tenant/installments/{id}/checkout', 'Payments::checkout_installment');
